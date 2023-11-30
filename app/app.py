@@ -12,42 +12,99 @@ import pyaudio
 import os
 import wave
 from model import S2T_Model
+import shutil
 
 plt.rcParams["figure.figsize"] = (10, 7)
 
 
-def record_audio(filename, duration=10):
+# def record_audio(filename, duration=10):
+#     CHUNK = 1024
+#     FORMAT = pyaudio.paInt16
+#     CHANNELS = 1
+#     RATE = 44100
+
+#     audio = pyaudio.PyAudio()
+
+#     stream = audio.open(format=FORMAT,
+#                         channels=CHANNELS,
+#                         rate=RATE,
+#                         input=True,
+#                         frames_per_buffer=CHUNK)
+
+#     st.sidebar.info(f"Recording... Speak into the microphone (max {duration} seconds).")
+#     frames = []
+#     for i in range(0, int(RATE / CHUNK * duration)):
+#         data = stream.read(CHUNK)
+#         frames.append(data)
+
+#     st.sidebar.success("Recording complete. Click 'Recognize' to process.")
+
+#     stream.stop_stream()
+#     stream.close()
+#     audio.terminate()
+
+#     wf = wave.open(filename, 'wb')
+#     wf.setnchannels(CHANNELS)
+#     wf.setsampwidth(audio.get_sample_size(FORMAT))
+#     wf.setframerate(RATE)
+#     wf.writeframes(b''.join(frames))
+#     wf.close()
+
+def record_audio():
     CHUNK = 1024
     FORMAT = pyaudio.paInt16
     CHANNELS = 1
     RATE = 44100
+    THRESHOLD = 400  # Điều chỉnh ngưỡng năng lượng âm thanh dựa trên nhu cầu của bạn
 
-    audio = pyaudio.PyAudio()
+    p = pyaudio.PyAudio()
 
-    stream = audio.open(format=FORMAT,
-                        channels=CHANNELS,
-                        rate=RATE,
-                        input=True,
-                        frames_per_buffer=CHUNK)
+    stream = p.open(format=FORMAT,
+                    channels=CHANNELS,
+                    rate=RATE,
+                    input=True,
+                    frames_per_buffer=CHUNK)
 
-    st.sidebar.info(f"Recording... Speak into the microphone (max {duration} seconds).")
+    print("Recording...")
+
     frames = []
-    for i in range(0, int(RATE / CHUNK * duration)):
+    silent_frames_count = 0
+
+    while True:
         data = stream.read(CHUNK)
+        audio_data = np.frombuffer(data, dtype=np.int16)
+
+        # Tính toán năng lượng âm thanh
+        energy = np.sum(audio_data ** 2) / len(audio_data)
+
         frames.append(data)
 
-    st.sidebar.success("Recording complete. Click 'Recognize' to process.")
+        if energy < THRESHOLD:
+            silent_frames_count += 1
+        else:
+            silent_frames_count = 0
 
+        # Nếu có đủ số lượng frame yên tĩnh, dừng quá trình ghi âm
+        if silent_frames_count > int(RATE / CHUNK):  
+            break
+
+    # print("Recording complete.")
+    st.sidebar.success("Waiting to Recognize")
     stream.stop_stream()
     stream.close()
-    audio.terminate()
-
-    wf = wave.open(filename, 'wb')
+    p.terminate()
+    if not os.path.exists("./temp"):
+        os.makedirs("./temp")
+    path_file = os.path.join("./temp", "recorded_audio.wav")
+    wf = wave.open(path_file, 'wb')
+    # wf = wave.open("output.wav", 'wb')
     wf.setnchannels(CHANNELS)
-    wf.setsampwidth(audio.get_sample_size(FORMAT))
+    wf.setsampwidth(p.get_sample_size(FORMAT))
     wf.setframerate(RATE)
     wf.writeframes(b''.join(frames))
     wf.close()
+    
+    return path_file
 
 
 def create_pipeline(transformations: list):
@@ -66,6 +123,20 @@ def create_audio_player(audio_data, sample_rate):
     return virtualfile
 
 
+def create_noise_file(audio_data, sample_rate):
+    virtualfile = io.BytesIO()
+    wavfile.write(virtualfile, rate=sample_rate, data=audio_data)
+
+    #save file
+    if not os.path.exists("./temp"):
+        os.makedirs("./temp")
+    path_save = os.path.join('./temp' ,"noise.wav")
+    with open(path_save ,"wb") as f:
+        f.write(virtualfile.getbuffer())
+        
+    return path_save
+
+
 @st.cache_data
 def handle_uploaded_audio_file(uploaded_file):
     a = pydub.AudioSegment.from_file(
@@ -82,8 +153,8 @@ def handle_uploaded_audio_file(uploaded_file):
 
 
 def plot_wave(y, sr):
-    print(y, sr)
-    print("bug here")
+    # print(y, sr)
+    # print("bug here")
     fig, ax = plt.subplots()
     img = librosa.display.waveshow(y, sr=sr, ax =ax, color="blue")
 
@@ -105,7 +176,7 @@ def spacing():
     st.markdown("<br></br>", unsafe_allow_html=True)
 
 
-def plot_audio_transformations(y, sr, pipeline: audiomentations.Compose):
+def plot_audio_transformations(y, sr, pipeline: audiomentations.Compose, path_save):
     cols = [1, 1, 1]
 
     col1, col2, col3 = st.columns(cols)
@@ -128,11 +199,16 @@ def plot_audio_transformations(y, sr, pipeline: audiomentations.Compose):
         )
         spacing()
         st.audio(create_audio_player(y, sr))
+    
+    text = recognize(path_save)
+    st.success(text)
+    os.remove(path_save)
     st.markdown("---")
 
     y = y
     sr = sr
     for col_index, individual_transformation in enumerate(pipeline.transforms):
+        # print('here', index_to_transformation)
         transformation_name = (
             str(type(individual_transformation)).split("'")[1].split(".")[-1]
         )
@@ -163,12 +239,20 @@ def plot_audio_transformations(y, sr, pipeline: audiomentations.Compose):
             )
             spacing()
             st.audio(create_audio_player(modified, sr))
+        
+        path = create_noise_file(modified, sr)
+        text = recognize(path)
+        st.success(text)
+        
+        os.remove(path)
+        
         st.markdown("---")
         plt.close("all")
 
 
 def load_audio_sample(file):
-    y, sr = librosa.load(file, sr=22050)
+    y, sr = librosa.load(file, sr=16000)
+    print(y, sr)
 
     return y, sr
 
@@ -182,8 +266,6 @@ def index_to_transformation(index: int):
         return audiomentations.TimeMask(p=0.5)
     elif index == 3:
         return audiomentations.Padding(p=1.0)
-
-
 
 
 
@@ -201,7 +283,6 @@ def action(file_uploader, transformations):
     with open(path_save ,"wb") as f:
         f.write(file_uploader.getbuffer())
         
-    
     if file_uploader is not None:
         y, sr = handle_uploaded_audio_file(file_uploader)
     else:
@@ -209,17 +290,31 @@ def action(file_uploader, transformations):
 
     pipeline = audiomentations.Compose(create_pipeline(transformations))
     try:
-        plot_audio_transformations(y, sr, pipeline)
+        plot_audio_transformations(y, sr, pipeline, path_save)
     except Exception as e:
         print(e)
         print("No files selected!!!")
     
     
-    text = recognize(path_save)
-    st.success(text)
-    st.balloons()
+    # st.balloons()
     #remove file
-    os.remove(path_save)
+    # os.remove(path_save)
+
+def action_record(file_path, transformations):
+    
+    if file_path:
+        y, sr = load_audio_sample(file_path)
+    else:
+        y, sr = None, None
+
+    pipeline = audiomentations.Compose(create_pipeline(transformations))
+    try:
+        plot_audio_transformations(y, sr, pipeline, file_path)
+    except Exception as e:
+        print(e)
+        print("No files selected!!!")
+    
+    
 
 def main():
     placeholder = st.empty()
@@ -227,7 +322,6 @@ def main():
     st.markdown(
         "# Vietnamese Speech to Text App\n"
         "Once you have chosen augmentation techniques, select or upload an audio file\n. "
-        'Then click "Apply" to start! \n\n'
     )
 
     if True:
@@ -248,7 +342,7 @@ def main():
             Nguyen Dang Quang Tuan\n'''
         st.markdown(members)
 
-        st.success("Waiting")
+        # st.success("Waiting")
     # st.sidebar.image("demo/assets/demoo.gif")
     st.sidebar.markdown("Choose the transformations here:")
     gaussian_noise = st.sidebar.checkbox("GaussianNoise")
@@ -263,17 +357,34 @@ def main():
     )
     st.sidebar.markdown("---")
     record_button = st.sidebar.button("Voice Here")
-
+    # Recognize_record = st.sidebar.button('Record Recognize')
+    
+    
+    st.sidebar.markdown("---")
+    Recognize = st.sidebar.button('Recognize')
+    
+    # file_path_record = ''
     if record_button:
         
-        if not os.path.exists("./temp"):
-            os.makedirs("./temp")
-            
-        file_path = os.path.join("./temp", "recorded_audio.wav")
-        record_audio(file_path)
+        file_path_record= record_audio()
+        placeholder.empty()
+        placeholder2.empty()
+        transformations = [
+            gaussian_noise,
+            frequency_mask,
+            time_mask,
+            padding,
+        ]
 
+        action_record(
+            file_path=file_path_record,
+            transformations=transformations,
+        )
+    
+
+    
     st.sidebar.markdown("---")
-    if st.sidebar.button("Recognize"):
+    if Recognize== True:
         placeholder.empty()
         placeholder2.empty()
         transformations = [
@@ -287,8 +398,9 @@ def main():
             file_uploader=file_uploader,
             transformations=transformations,
         )
-
-
+   
+    if os.path.exists('./temp'):
+        shutil.rmtree('./temp')
 
 
 if __name__ == "__main__":
